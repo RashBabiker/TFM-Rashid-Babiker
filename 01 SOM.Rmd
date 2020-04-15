@@ -1,0 +1,480 @@
+---
+title: "R Notebook"
+output: html_notebook
+---
+
+# Librerías:
+
+```{r include=F}
+library(DESeq2)
+library(plyr)
+library(kohonen)   ### para Self-Organizing Maps (SOM)
+library(RColorBrewer) ## para la paleta de colores
+library(xlsx)
+library(tidyverse)
+library(reshape2)
+library(gridExtra)
+```
+
+# Información transcriptómica
+
+```{r}
+# Se usan las cuentas crudas de RNAseq del día 6 y 14
+cuentas<-read.table(file="../material usado/counts_14_6.txt", sep="\t", header = TRUE, row.names = 1)
+
+cuentas<-as.matrix(cuentas)
+# Se deja solo el proteinid del nombre
+rownames(cuentas)<-gsub("jgi.p\\|Agrped1\\|","",rownames(cuentas))
+# Traducción de las columnas
+colnames(cuentas)<-c(paste("paja14",c(1,3),sep="_"),paste("ref14",1:3,sep="_"),
+                     paste("paja6",c(1,3),sep="_"),paste("ref6",1:3,sep="_")
+                     )
+```
+
+```{r}
+# Promedio de todas las réplicas en todas las condiciones, para cada tránscrito.
+media_filas <- apply(cuentas, 1, mean) 
+names(media_filas) <- NULL
+
+# Se seleccionan los tránscritos que, en promedio, superen 5 cuentas. Es un filtro para reducir el número de genes, lo que supone un aumento de potencia de los análisis posteriores.
+cuentas <- cuentas[media_filas>=5,] 
+paste0 ("nº de tránscritos: ", nrow(cuentas))
+```
+
+Número de genes cuyo promedio entre replicas supere las 5 counts.
+
+```{r}
+paja6 <- as.data.frame(cuentas) %>% select(c(paja6_1, paja6_3))
+media_filas <- apply(paja6, 1, mean)
+paste0("paja6: ", sum(media_filas>5))
+
+control6 <- as.data.frame(cuentas) %>% select(c(ref6_1, ref6_2, ref6_3)) 
+media_filas <- apply(control6, 1, mean)
+paste0("control6: ", sum(media_filas>5))
+
+paja14 <- as.data.frame(cuentas) %>% select(c(paja14_1, paja14_3))
+media_filas <- apply(paja14, 1, mean)
+paste0("paja14: ", sum(media_filas>5))
+
+control14 <- as.data.frame(cuentas) %>% select(c(ref14_1, ref14_2, ref14_3))
+media_filas <- apply(control14, 1, mean)
+paste0("control14: ", sum(media_filas>5))
+```
+
+# Normalización
+
+Primero se contruye el DESeqDataSet para poder hacer la normalización de DESeq.
+
+```{r}
+# en coldata se consideran los factores sustrato y tiempo, así como la combinación de estos.
+
+coldata<-data.frame(medio=c(rep("paja",2),rep("ref",3),rep("paja",2),rep("ref",3)),tiempo=c(rep("14",5), rep("6",5)))
+rownames(coldata)<-colnames(cuentas)
+
+coldata$medio<-factor(coldata$medio,levels=c("ref","paja"))
+coldata$tiempo<-factor(coldata$tiempo,levels=c("6","14"))
+coldata$combi<-paste(coldata$medio,coldata$tiempo,sep="")
+coldata$combi<-factor(coldata$combi,levels=c("ref6","ref14","paja6","paja14"))
+
+dds <- DESeqDataSetFromMatrix(countData = cuentas,
+                              colData = coldata,
+				                      design= ~ combi)
+
+# normalización por rlog:
+
+rld<-rlog(dds,blind=F) # blind dispersion estimation is not the appropriate choice if one expects that many or the majority of genes (rows) will have large differences in counts which are explainable by the experimental design, and one wishes to transform the data for downstream analysis. http://bioconductor.org/packages/release/bioc/vignettes/DESeq2/inst/doc/DESeq2.html#why-un-normalized-counts
+rld<-assay(rld)
+```
+
+```{r}
+head(rld)
+# se calculan las medias de cada condición, esta es la matriz de transcriptoma con las cuentas normalizadas, a partir de la cual se hace el SOM.
+rld<-cbind(paja14=rowMeans(rld[,1:2]),ref14=rowMeans(rld[,3:5]),paja6=rowMeans(rld[,6:7]),ref6=rowMeans(rld[,8:10]))
+```
+
+# Construyendo el SOM
+
+A partir de los datos transcriptómicos exclusivamente.
+
+Con este código se hace el som, como tarda hora y media, mejor cargar el archivo R.data, esto tiene la ventaja de que siempre se trabaja con el mismo archivo, no con uno ligeramente distinto cada vez que se calcula.
+
+```{r}
+# transcritos <- nrow(cuentas)
+# nodos <- 5*sqrt(transcritos)
+# filas_y_columnas <- trunc(sqrt(nodos))
+# iteraciones <- trunc(nodos*100)
+# 
+# start_time <- Sys.time()
+# set.seed(20)
+# som_grid576 <- somgrid(xdim = filas_y_columnas, ydim=filas_y_columnas, topo="hexagonal")
+# som_model576 <- som(rld,
+#     grid=som_grid576,
+#     rlen=iteraciones,
+#     alpha=c(0.05,0.01),
+#     keep.data = TRUE )
+# end_time <- Sys.time()
+# end_time - start_time
+# 
+# save(som_model576,file="resultados/semilla20.RData")
+load("semilla16.RData", verbose = T)
+```
+
+Con los siguientes plot se ven los patrones de expresión:
+
+```{r}
+# mediante fan chart
+p14 <- "#CF500A";c14 <- "#6F5BEB";p42 <- "#FFB65C";c42 <- "#8BBEFF";p6 <- "#FFB65C";c6 <- "#59EAEB"
+colores <- function(n) {c(p6, p14, p42, c6, c14, c42)} 
+
+pdf("../00 resultados/patrones de expresión 576 colores por tipo.pdf",width=10, height=10,paper="a4")
+plot(som_model576, type="codes",shape="straight", palette.name = colores)
+dev.off()
+
+# mediante mapa de calor
+miPaleta <- colorRampPalette(rev(brewer.pal(11, "Spectral")))
+
+coord_nodes<-as.data.frame(som_model576$grid$pts)
+coord_nodes$nodes<-1:576
+
+pdf("../00 resultados/som_expresion.pdf",width=10, height=10,paper="a4")
+par(mfrow=c(2,2))
+for(i in 1:4){
+plot(som_model576, type = "property", property = getCodes(som_model576)[,i], main=colnames(getCodes(som_model576))[i], palette.name=miPaleta,shape="straight")
+text(coord_nodes$x,coord_nodes$y,labels=coord_nodes$nodes,cex=0.3)
+}
+
+dev.off()
+```
+
+El resto de gráficas están en el archivo graficas.Rmd
+
+## Secretoma
+
+```{r}
+tmp <- list.files(path = "../material usado/secretoma/",pattern="AP*")
+tmp <- tmp[c(1,3,4,6)] # se usan las datos del secretoma del día 6 y 14
+# con esta función se leen los archivos de secretoma
+secretoma <- lapply(tmp, function(x){read.csv(paste0("../material usado/secretoma/",x))}) 
+names(secretoma)<-gsub("AP-|.csv","",tmp)
+# selección de las proteínas y PSM con Unique Peptides > 1
+secretoma<-lapply(secretoma,function(x){x[x[,6]>1,c(2,8)]})  
+
+# Las siguientes líneas arreglan el nombre de la proteína para dejar solo el id. También se seleccionan la columna del proteinid y la del número de PSMs, el resto de variables no son necesarias para estos análisis.
+secretoma<-lapply(secretoma,function(x){x[,1]<-gsub("Agrped1 ","",x[,1]);x})
+secretoma<-lapply(secretoma,function(x){x[,1]<-unlist(strsplit(x[,1],"\\|"))[c(TRUE,FALSE)];x})
+
+# Se nombra la columna de PSMS de cada condición: 
+secretoma<-Map(function(x,y){colnames(x)<-c("proteinid",y);x},secretoma,names(secretoma))
+# Se combina la tabla y eliminan los NAs (se sustituye por 0).
+PSM<-join_all(secretoma,by="proteinid",type ="full")
+PSM[is.na(PSM)]<-0
+
+# Se ordenan las columnas y se nombran para reconocerlas posteriormente con facilidad.
+PSM <- PSM[c("proteinid", "AP6", "AP14", "C6", "C14")]
+colnames(PSM) <- c("proteinid", "Wheat6_PSMs", "Wheat14_PSMs", "C6_PSMs", "C14_PSMs")
+
+write.table(PSM,"../00 resultados/PSMs.txt",sep="\t",row.names=F,quote=F)
+
+# Se prepara la tabla de forma que las proteinas secretadas en cada condiciones tienen una columna que indica que se secretan ("YES")
+secretoma <-lapply(secretoma,function(x){cbind.data.frame(proteinid=x[,1],"YES")})
+for (i in 1:length(secretoma)){colnames(secretoma[[i]])[2]<-names(secretoma)[i]}
+# combino las tablas
+secretoma<-join_all(secretoma,by="proteinid",type ="full")
+# Los NAs aparecen cuando el gen no está en esa condición expresado, por lo que se sustituyen por "NO"
+secretoma<-as.data.frame(apply(secretoma,1:2,function(x){ifelse(is.na(x),"NO",x)}))
+for(i in 1:5){secretoma[,i]<-factor(secretoma[,i])}
+```
+
+## Transcriptoma más secretoma
+
+```{r}
+# Con este código se recupera el rld del som_model importado del archivo R.data, para que las primeras líneas de código se puedan omitir y ahorrar tiempo.
+rld<-as.data.frame(som_model576$data[[1]])
+# Se extraen los rownames a una columna
+rld$proteinid<-rownames(rld)
+rld <- rld %>% select(proteinid, everything())
+# Se combina la información del transcriptoma y secretoma, según el proteinid
+datos <- merge(rld, secretoma, by="proteinid", all.x = T)
+datos[is.na(datos)] <- "NO"
+```
+
+# TABLAS
+
+## Tabla de enzimas
+
+```{r}
+# som_model576[[2]] o $unit.classif es un vector que indica en que posición esta cada gen, sigue exactamente el mismo orden que data, si no fuera así no se podrían fusionar las tablas. esta linea de código une este vector con el de la proteína:
+som_nodes <- cbind.data.frame(node = som_model576[[2]], proteinid = rld$proteinid)
+
+# Se combina con el secretoma y transcriptoma
+datos2 <- merge(som_nodes, datos, by="proteinid", all.x = T) %>% select(c(node, everything()))
+# Cálculo de los Fold Change tal como se explica en el material y métodos:
+datos2$log2FC_PajaRef14<-datos2$paja14-datos2$ref14
+datos2$log2FC_PajaRef6<-datos2$paja6-datos2$ref6
+datos2 <- datos2 %>%  select(c("node", "proteinid", "ref6", "ref14", "paja6", "paja14", "log2FC_PajaRef6", "log2FC_PajaRef14", "C6", "C14", "AP6", "AP14"))
+
+# Orden por nodos
+datos2$node<-as.factor(datos2$node) 
+datos2<-datos2[order(datos2$node),] 
+```
+
+## Tabla de nodos
+
+```{r}
+# Se hace una lista, cada nodo es un dataframe de la lista
+ldatos<-by(datos2,datos2$node,list) 
+
+# Las medias de expresión de cada nodo
+nodes_means <- data.frame()
+for (nodo in 1:length(ldatos)) {
+  x <- colMeans(ldatos[[nodo]][,3:8]) #medias por columnas
+nodes_means <- rbind(nodes_means, x) #combino todas en una tabla
+}
+colnames(nodes_means) <- c("ref6", "ref14", "paja6", "paja14", "log2FC_PajaRef6", "log2FC_PajaRef14")
+
+# Porcentaje de proteías que se secretan
+nodes_secretome <- data.frame()
+for (nodo in 1:length(ldatos)) {
+x <- ldatos[[nodo]][,9:12]
+x <- apply(x, 2, function(i){round(sum(i=="YES")/length(i),2)})
+nodes_secretome <- rbind(nodes_secretome, x)
+}
+colnames(nodes_secretome) <- c("C6", "C14", "AP6", "AP14")
+
+# Se combinan las medias de tránscritos y el porcentaje de enzimas secretadas de cada nodo.
+nodes<-cbind.data.frame(round(nodes_means,2),nodes_secretome)
+```
+
+## Tabla con enzimas y nodos
+
+```{r}
+# Para distinguir las medias de las enzimas, a los nodos se le pone la etiqueta MEDIA
+nodes$node<-paste("MEDIA",rownames(nodes),sep=" ")
+nodes$proteinid<-"-" # los nodos no tienen proteinid
+# Se ordenan las columnas
+nodes <- nodes %>%  select(node,proteinid,everything())
+lnodes<-by(nodes,rownames(nodes),list)
+lnodes<-lnodes[as.character(1:length(lnodes))]   # para ordenar la lista por el número de nodo
+
+# Redondeo de los datos de las enzimas
+for(i in 3:8){datos2[,i]<-round(datos2[,i],2)}
+# Al poner el secretoma como caracteres se evita un error posterior
+for(i in 9:12){datos2[,i]<-as.character(datos2[,i])}  
+
+# Con las siguientes líneas se pone al final de cada nodo, su media
+ldatos<-by(datos2,datos2$node,list)
+ldatosNodes<-Map(rbind.data.frame,ldatos,lnodes)
+datosNodes<-do.call(rbind.data.frame,ldatosNodes)
+
+write.table(datosNodes, "../00 resultados/SOM576_medias.txt", sep = "\t", row.names = F, quote = F)
+
+# Si para trabajar molestaran las filas con las medias se pueden quitar con este código
+SOM <- datosNodes[!grepl("MEDIA",datosNodes$node),]
+
+write.table(SOM, "../00 resultados/SOM576_no_medias.txt", sep = "\t", row.names = F, quote = F)
+```
+
+## tabla resumen
+
+Es una tabla donde se indica cada nodo con sus proteinid
+
+```{r}
+som_nodes$node<-factor(som_nodes$node) 
+som_nodes$proteinid<-as.character(som_nodes$proteinid)
+lsom_nodes<-by(som_nodes,som_nodes$node,list) # Lista de cada nodo con sus proteías
+num_prot_nodo<-sapply(lsom_nodes,nrow) # número de proteínas por nodo
+
+lsom_nodes<-lapply(lsom_nodes,function(x) c(x[,2])) # vector con las proteías de cada nodo
+lsom_nodes<-lapply(lsom_nodes,function(x) paste(x,collapse=" / "))  # colapsa los vectores en una sola string con / como separador
+
+# convierte la lista en una tabla
+som_nodes2<-do.call(rbind.data.frame,lsom_nodes) 
+# genera una tabla más completa, añade el número del nodo, el número de proteías que tiene ese nodo y las distintas proteías.
+som_nodes2<-data.frame(nodes=names(lsom_nodes),num_proteins=num_prot_nodo,proteins=som_nodes2[,1]) 
+
+write.table(som_nodes2, file = "../00 resultados/resumen_nodos.txt", sep = "\t", row.names = F, quote = F)
+```
+
+# Selección de nodos que cumplen los dos criterios
+
+Los nodos pueden ser HT si la media de expresión en paja supera 12, DGE si la expresión es diferencial (fold change >2), o HT-DGE si cumple ambos. 
+
+## HT o DGE
+
+Los que cumplen alguno de los criterios, se usó como idea original pero la idea de separar por DGE, HT y HT-DGE es mejor para sacar conclusiones.
+
+```{r}
+#selección de las medias que superan al menos uno de los dos criterios
+nodes_selec<-nodes[nodes$paja14>=12 | nodes$paja6>=12 | nodes$log2FC_PajaRef14>=2 | nodes$log2FC_PajaRef6>=2,]
+
+# Se hace una lista con lo anterior, los nombres son los de los nodos, por tanto los nombres de la lista son las de los nodos que cumplen los dos criterios.
+lnodes_selec<-by(nodes_selec,rownames(nodes_selec),list) 
+# (names(lnodes_selec) # para confirmar
+
+ldatos_selec<-ldatos[names(lnodes_selec)] # selecciona de ldatos, solo los componentes de la lista que superan los dos criterios
+
+# con el siguiente codigo se genera una lista con todas las tablas
+ldatosNodes_selec<-Map(rbind.data.frame,ldatos_selec,lnodes_selec) 
+
+# y se combina en un tabla
+datosNodes_selec<-do.call(rbind.data.frame,ldatosNodes_selec)
+
+dir.create("../00 resultados/seleccionados")
+dir.create("../00 resultados/seleccionados/HT o DGE/")
+
+# Se guardan las tablas serán utiles en posteriores análisis:
+
+write.table(datosNodes_selec, file = "../00 resultados/seleccionados/HT o DGE/con medias.txt", sep = "\t", row.names = F, quote = F)
+
+som_nodes2_selec<-som_nodes2[som_nodes2$node %in% rownames(nodes_selec),]
+
+write.table(som_nodes2_selec, file = "../00 resultados/seleccionados/HT o DGE/resumen.txt", sep = "\t", row.names = F, quote = F)
+
+SOM_select <- datosNodes_selec[!grepl("MEDIA*",datosNodes_selec$node),]
+write.table(SOM_select, "../00 resultados/seleccionados/HT o DGE/sin medias.txt", sep = "\t", row.names = F, quote = F)
+```
+
+## HT
+El requisito es que en paja (cualquiera de los dos días) la expresión media del nodo sea superior a 12 y que no sea DGE
+
+```{r}
+# criterio del filtro:
+nodes_selec<-nodes[(nodes$paja14>=12 | nodes$paja6>=12) & !(nodes$log2FC_PajaRef14>=2 | nodes$log2FC_PajaRef6>=2),]
+
+# este código es idéntico al de HT o DGE.
+
+lnodes_selec<-by(nodes_selec,rownames(nodes_selec),list)
+
+ldatos_selec<-ldatos[names(lnodes_selec)] 
+
+ldatosNodes_selec<-Map(rbind.data.frame,ldatos_selec,lnodes_selec) 
+
+datosNodes_selec<-do.call(rbind.data.frame,ldatosNodes_selec)
+
+dir.create("../00 resultados/seleccionados/HT/")
+
+write.table(datosNodes_selec, file = "../00 resultados/seleccionados/HT/con medias.txt", sep = "\t", row.names = F, quote = F)
+
+som_nodes2_selec<-som_nodes2[som_nodes2$node %in% rownames(nodes_selec),]
+
+write.table(som_nodes2_selec, file = "../00 resultados/seleccionados/HT/resumen.txt", sep = "\t", row.names = F, quote = F)
+
+SOM_select <- datosNodes_selec[!grepl("MEDIA*",datosNodes_selec$node),]
+write.table(SOM_select, "../00 resultados/seleccionados/HT/sin medias.txt", sep = "\t", row.names = F, quote = F)
+```
+
+## DGE
+
+Expresión diferencial (fold change >2) y no HT
+
+```{r}
+# criterio del filtro:
+nodes_selec<-nodes[!(nodes$paja14>=12 | nodes$paja6>=12) & (nodes$log2FC_PajaRef14>=2 | nodes$log2FC_PajaRef6>=2),]
+# este código es idéntico al de HT o DGE.
+
+lnodes_selec<-by(nodes_selec,rownames(nodes_selec),list) 
+
+ldatos_selec<-ldatos[names(lnodes_selec)] 
+
+ldatosNodes_selec<-Map(rbind.data.frame,ldatos_selec,lnodes_selec) 
+
+datosNodes_selec<-do.call(rbind.data.frame,ldatosNodes_selec)
+
+
+dir.create("../00 resultados/seleccionados/DGE/")
+
+write.table(datosNodes_selec, file = "../00 resultados/seleccionados/DGE/con medias.txt", sep = "\t", row.names = F, quote = F)
+
+som_nodes2_selec<-som_nodes2[som_nodes2$node %in% rownames(nodes_selec),]
+
+write.table(som_nodes2_selec, file = "../00 resultados/seleccionados/DGE/resumen.txt", sep = "\t", row.names = F, quote = F)
+
+SOM_select <- datosNodes_selec[!grepl("MEDIA*",datosNodes_selec$node),]
+write.table(SOM_select, "../00 resultados/seleccionados/DGE/sin medias.txt", sep = "\t", row.names = F, quote = F)
+```
+
+## HT y DGE
+
+```{r}
+#criterio del filtro:
+nodes_selec<-nodes[(nodes$paja14>=12 | nodes$paja6>=12) & (nodes$log2FC_PajaRef14>=2 | nodes$log2FC_PajaRef6>=2),]
+# este código es idéntico al de HT o DGE.
+
+lnodes_selec<-by(nodes_selec,rownames(nodes_selec),list) 
+
+ldatos_selec<-ldatos[names(lnodes_selec)]
+
+ldatosNodes_selec<-Map(rbind.data.frame,ldatos_selec,lnodes_selec) 
+
+datosNodes_selec<-do.call(rbind.data.frame,ldatosNodes_selec)
+
+dir.create("../00 resultados/seleccionados/HT y DGE/")
+
+write.table(datosNodes_selec, file = "../00 resultados/seleccionados/HT y DGE/con medias.txt", sep = "\t", row.names = F, quote = F)
+
+som_nodes2_selec<-som_nodes2[som_nodes2$node %in% rownames(nodes_selec),]
+
+write.table(som_nodes2_selec, file = "../00 resultados/seleccionados/HT y DGE/resumen.txt", sep = "\t", row.names = F, quote = F)
+
+SOM_select <- datosNodes_selec[!grepl("MEDIA*",datosNodes_selec$node),]
+write.table(SOM_select, "../00 resultados/seleccionados/HT y DGE/sin medias.txt", sep = "\t", row.names = F, quote = F)
+```
+
+### Otros filtros
+
+Adicionalmente, se seleccionan las proteías que, no estando en nodos seleccionados por la media, individualmente sí cumplen alguno de los criterios
+
+```{r}
+#criterio del filtro:
+nodes_selec<-nodes[nodes$paja14<12 & nodes$paja6<12 & nodes$log2FC_PajaRef14<2 & nodes$log2FC_PajaRef6<2,]
+# este código es idéntico al de HT o DGE.
+
+lnodes_selec<-by(nodes_selec,rownames(nodes_selec),list)
+
+ldatos_selec<-ldatos[names(lnodes_selec)]
+
+ldatosNodes_selec<-Map(rbind.data.frame,ldatos_selec,lnodes_selec) 
+
+datosNodes_selec<-do.call(rbind.data.frame,ldatosNodes_selec)
+datosNodes_selec <- datosNodes_selec[datosNodes_selec$paja14>=12 | datosNodes_selec$paja6>=12 | datosNodes_selec$log2FC_PajaRef14>=2 | datosNodes_selec$log2FC_PajaRef6>=2,]
+
+dir.create("../00 resultados/seleccionados/proteinas restantes/", showWarnings = F)
+
+write.table(datosNodes_selec, file = "../00 resultados/seleccionados/proteinas restantes/con medias.txt", sep = "\t", row.names = F, quote = F)
+
+som_nodes2_selec<-som_nodes2[som_nodes2$node %in% rownames(nodes_selec),]
+
+write.table(som_nodes2_selec, file = "../00 resultados/seleccionados/proteinas restantes/resumen.txt", sep = "\t", row.names = F, quote = F)
+
+SOM_select <- datosNodes_selec[!grepl("MEDIA*",datosNodes_selec$node),]
+write.table(SOM_select, "../00 resultados/seleccionados/proteinas restantes/sin medias.txt", sep = "\t", row.names = F, quote = F)
+```
+
+### secretadas
+
+También se seleccionan todos los nodos donde haya al menos una proteía secretada, es un filtro menos estricto que no parece ser util.
+
+```{r}
+# criterio del filtro:
+nodes_selec<-nodes[nodes$C6>0 | nodes$C14 >0 | nodes$AP6>0 | nodes$AP14>0 ,]
+# este código es idéntico al de HT o DGE.
+
+lnodes_selec<-by(nodes_selec,rownames(nodes_selec),list) 
+
+ldatos_selec<-ldatos[names(lnodes_selec)] 
+
+ldatosNodes_selec<-Map(rbind.data.frame,ldatos_selec,lnodes_selec) 
+
+datosNodes_selec<-do.call(rbind.data.frame,ldatosNodes_selec)
+
+dir.create("../00 resultados/seleccionados/proteinas secretadas/")
+
+write.table(datosNodes_selec, file = "../00 resultados/seleccionados/proteinas secretadas/con medias.txt", sep = "\t", row.names = F, quote = F)
+
+som_nodes2_selec<-som_nodes2[som_nodes2$node %in% rownames(nodes_selec),]
+
+write.table(som_nodes2_selec, file = "../00 resultados/seleccionados/proteinas secretadas/resumen.txt", sep = "\t", row.names = F, quote = F)
+
+SOM_select <- datosNodes_selec[!grepl("MEDIA*",datosNodes_selec$node),]
+write.table(SOM_select, "../00 resultados/seleccionados/proteinas secretadas/sin medias.txt", sep = "\t", row.names = F, quote = F)
+```

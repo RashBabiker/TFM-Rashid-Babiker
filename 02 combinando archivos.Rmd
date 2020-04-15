@@ -1,0 +1,175 @@
+---
+title: "R Notebook"
+output: html_notebook
+---
+
+# Librerias:
+
+```{r include=F}
+library(plyr); library(tidyverse); library(xlsx)
+```
+
+# tablas necesarias
+```{r include=F}
+som <- read.csv("../00 resultados/SOM576_medias.txt", sep = "\t", header = T)
+psm <- read.csv("../00 resultados/PSMs.txt", sep = "\t", header = T)
+
+# Se genera la columna orden para poder mantener el orden actual, con las medias al final de cada nodo
+som$orden <- 1:nrow(som)
+```
+
+# Combino som y psms
+
+Se sustituyen las columnas binarias del secretoma (las que indican si una proteína se secreta o no) por los valores numéricos, de PSMs, las medias reflejarán el porcentaje de proteínas secretadas.
+
+```{r}
+som <- merge(som, psm, by = "proteinid", all.x = T)
+
+som <- som %>% select(c("orden", "node","proteinid", everything())) %>% arrange(orden)
+
+# Selección de las medias
+medias <- som[grep("MEDIA", som$node),] %>% select(c("node", "AP6","AP14","C6", "C14"  ))
+
+medias[,2:5] <- apply(medias[2:5], 2, as.numeric)
+
+for (i in 1:4) {
+  som[,14:17][,i][grep("MEDIA", som$node)] <- paste0(medias[,2:5][,i]*100,"%")}
+
+# Se eliminan las columnas binarias del secretoma
+som <- som %>% select(-c(C6, C14, AP6, AP14))
+som[is.na(som)] <- 0
+```
+
+# Columna de dos criterios
+
+Añado una columna en la que se específica si las enzimas o la media de los nodos cumplen los criterios de HT, DGE o ambos.
+
+```{r}
+som$high_counts <-  som$paja6 >= 12 | som$paja14 >= 12
+som$DEG <-  som$log2FC_PajaRef6 >= 2 | som$log2FC_PajaRef14 >= 2  #DEG = differential expresion genes
+som$high_counts_or_DEG <- som$high_counts | som$DEG
+som$high_counts_and_DEG <- som$high_counts & som$DEG
+
+SI_NO <- function(x) { # funcion sencilla que transforma los FALSE en no y los TRUE en si
+  x <- as.character(x) 
+  x <- gsub(pattern = "TRUE", replacement = "YES", x = x)
+  x <- gsub(pattern = "FALSE", replacement = "NO", x = x)
+  return(x)
+}
+# Se aplica a las nuevas columnas
+som[14:ncol(som)] <- lapply(som[14:ncol(som)], SI_NO)
+colnames(som[14:ncol(som)])
+# Se ordenan las tablas, no es necesario hacerlo en cada paso, pero permite seguir mejor la combinación y corregir errores fácilmente.
+som <- som %>% select(c("orden", "node","proteinid", "high_counts", "DEG", "high_counts_or_DEG",  "high_counts_and_DEG", everything())) %>% arrange(orden)
+```
+
+# Secretoma teóricos
+
+```{r}
+sec_teorico <- read.csv("../material usado/46 Agrpe exocazoma+ funcion.txt", sep = "\t", header = T)
+# si una enzima aparece en esta tabla significa que según Secretool debería ser secretada
+sec_teorico <- cbind.data.frame(
+  proteinid = sec_teorico$proteinid,
+  secretoma_teorico = "YES")
+
+# al combinar la columna sec_teorico tendrá SI o NA
+som <- merge(som, sec_teorico, by = "proteinid", all.x = T)
+
+# se cambian los NAs por "NO"
+som$secretoma_teorico <- as.character(som$secretoma_teorico)
+som$secretoma_teorico[is.na(som$secretoma_teorico)] <- "NO"
+som$secretoma_teorico <- as.factor(som$secretoma_teorico)
+
+# Se ordena
+som <- som %>% select(c("orden", "node","proteinid", "high_counts", "DEG", "high_counts_or_DEG",  "high_counts_and_DEG", "secretoma_teorico", everything())) %>% arrange(orden)
+```
+
+# Anotaciones automáticas
+
+```{r}
+# Tabla de funciones para A.pediades extraida de JGI
+funciones <- read.csv("../material usado/funciones.txt", sep = "\t", header = T)
+colnames(funciones)[1] <- "proteinid"
+# se combina por proteinid
+som <- merge(som, funciones, by="proteinid", all.x = T)
+
+# se sustituyen los NA por nada, para dejar la tabla más clara.
+som[1:ncol(som)] <- lapply(som[1:ncol(som)], as.character)
+som[is.na(som)] <- ""
+som$orden <- as.numeric(som$orden)
+
+som <- som %>% select(c("orden", everything())) %>% arrange(orden)
+```
+
+# Anotación manual de Cazymes
+
+Se añaden las anotaciones manuales de Cazymes de A.pediades hechas por Francisco Javier Ruiz-Dueñas y por mí.
+
+```{r}
+cazy <- read.csv("../material usado/46 agrocybe_pediades_CAZymes.txt", sep = "\t", header = T)
+
+cazy$proteinId <- as.character(cazy$proteinId)
+
+funciones_cazymas <- read.csv("../material usado/00 funciones Cazymas.txt", sep = "\t", header = T)
+
+cazy_fun <- merge(cazy, funciones_cazymas, by = "description", all.x = T)
+
+colnames(cazy_fun) <- c("CAZymes", "proteinid",  "modelnotes", "CAZyme_definition", "CAZyme_function", "CAZyme_substrate")
+
+cazy_fun <- cazy_fun[,c(2,1,4:6)]
+```
+
+```{r}
+som <- merge(som, cazy_fun, by="proteinid", all.x = T)
+
+som[1:ncol(som)] <- lapply(som[1:ncol(som)], as.character)
+som[is.na(som)] <- ""
+som$orden <- as.numeric(som$orden)
+colnames(som)
+som <- som %>% select(c("orden", "node", "proteinid", "high_counts", "DEG", "high_counts_or_DEG", "high_counts_and_DEG", "secretoma_teorico", "ref6", "ref14", "paja6", "paja14" ,"log2FC_PajaRef6", "log2FC_PajaRef14", "CAZymes", "CAZyme_definition", "CAZyme_function", "CAZyme_substrate", everything())) %>% arrange(orden)
+
+write.table(som, "../00 resultados/00 SOM.txt", sep = "\t", quote = F, row.names = F)
+```
+
+Esta tabla incluye toda la información de las enzimas que se usará en el análisis.
+
+# Nodos seleccionados
+
+A partir de la tabla completa se van a filtrar los nodos según los criterios de HT, DGE o ambos.
+
+Simplemente se eligen los nodos de la tabla completa que aparecen también en la tabla de las regiones filtradas, construidas en el archivo 01 SOM.Rmd
+
+```{r}
+HToDGE <- read.csv("../00 resultados/seleccionados/HT o DGE/con medias.txt", sep = "\t", header = T)
+
+HTyDGE <- read.csv("../00 resultados/seleccionados/HT y DGE/con medias.txt", sep = "\t", header = T)
+
+HT <- read.csv("../00 resultados/seleccionados/HT/con medias.txt", sep = "\t", header = T)
+
+DGE <- read.csv("../00 resultados/seleccionados/DGE/con medias.txt", sep = "\t", header = T)
+
+resto <- read.csv("../00 resultados/seleccionados/proteinas restantes/con medias.txt", sep = "\t", header = T)
+
+secretados <- read.csv("../00 resultados/seleccionados/proteinas secretadas/con medias.txt", sep = "\t", header = T)
+```
+
+```{r}
+HToDGE <- som %>% filter (node %in% HToDGE$node)
+write.table(HToDGE, "../00 resultados/seleccionados/HT o DGE/00 SOM con todo.txt", sep = "\t", quote = F, row.names = F)
+
+HTyDGE <- som %>% filter (node %in% HTyDGE$node)
+write.table(HTyDGE, "../00 resultados/seleccionados/HT y DGE/00 SOM con todo.txt", sep = "\t", quote = F, row.names = F)
+
+HT <- som %>% filter (node %in% HT$node)
+write.table(HT, "../00 resultados/seleccionados/HT/00 SOM con todo.txt", sep = "\t", quote = F, row.names = F)
+
+DGE <- som %>% filter (node %in% DGE$node)
+write.table(DGE, "../00 resultados/seleccionados/DGE/00 SOM con todo.txt", sep = "\t", quote = F, row.names = F)
+
+som_resto <- som %>% filter (proteinid %in% resto$proteinid)
+write.table(som_resto, "../00 resultados/seleccionados/proteinas restantes/00 SOM con todo.txt", sep = "\t", quote = F, row.names = F)
+
+som_secretadas <- som %>% filter (node %in% secretados$node)
+write.table(som_secretadas, "../00 resultados/seleccionados/proteinas secretadas/00 SOM con todo.txt", sep = "\t", quote = F, row.names = F)
+```
+

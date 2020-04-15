@@ -1,0 +1,386 @@
+---
+title: "R Notebook"
+output: html_notebook
+---
+
+# librerias
+
+```{r}
+library(ggplot2)
+library(plyr)
+library(dplyr)
+library(kohonen)   
+library(RColorBrewer) 
+library(gridExtra)
+library(reshape2)
+library(pdftools)
+
+load("semilla16.RData",verbose=T)
+
+nodes<-read.csv("../00 resultados/SOM576_medias.txt",header=T, sep = "\t")
+nodes_prot<-read.csv("../00 resultados/resumen_nodos.txt",header=T, sep = "\t") # para el número de genes por nodo.
+```
+
+```{r}
+colnames(nodes_prot)[1]<-"node" # cambia de nodes a node
+
+nodes<-nodes[grepl("MEDIA",nodes$node),] # selecciona las medias
+
+# 3 cambios: quitar proteinid porque para medias no aporta nada, cambia MEDIA 1 por 1 directamente y quita los rownames
+nodes$proteinid<-NULL; nodes$node<-1:nrow(nodes); rownames(nodes)<-NULL
+
+# Convierte el porcentaje de proteínas expresadas en numérico
+nodes<-cbind.data.frame(nodes[,1:7],apply(nodes[,8:11],2,function(x){as.numeric(as.character(x))}))
+
+coord_nodes<-as.data.frame(som_model576$grid$pts) # coordenadas de los nodos del som
+coord_nodes$node<-as.factor(1:576)
+
+# combina las tablas, añadiendo a la del som dos columnas que son las coordenadas y el número de genes que tiene cada nodo.
+nodes<-join_all(list(nodes,coord_nodes,nodes_prot[,1:2]),by="node")
+
+# orden
+nodes <- nodes %>% select(node,num_proteins,x,y,everything()) 
+```
+
+```{r}
+PSM<-read.table("../00 resultados/PSMs.txt",header=T,sep="\t",quote="",stringsAsFactors=F)
+
+# proteínas por nodo
+som_pts <- cbind.data.frame(node = som_model576[[2]],
+                            proteinid = rownames(som_model576$data[[1]]))
+# Se añaden a los PSMs
+PSM <- join_all(list(som_pts,PSM),by="proteinid",type = "left")
+# Se pasan los NAs a 0
+PSM[is.na(PSM)] <- 0
+
+# Se hace una lista en la que cada nodo es una tabla con sus genes y estas con sus PSMs
+lpsm<-by(PSM,PSM$node,list)
+
+# Se suman los PSMs en cada condición, se usa para generar el color de fondo en la gráfica de los secretomas.
+suma_psm<-lapply(lpsm,function(x){colSums(x[,3:6],na.rm=T)})
+
+# Se combina la lista en una tabla
+suma_psm<-do.call(rbind.data.frame,suma_psm)
+colnames(suma_psm)<-c("sumPaja6", "sumPaja14", "sumControl6", "sumControl14")
+
+suma_psm$node<-names(lpsm)
+
+# Número de proteínas que se secretan, este es el valor entre paréntesis de la gráfica del secretoma
+nodo=570
+n_secretadas <- data.frame()
+for (nodo in 1:length(lpsm)) {
+x <- lpsm[[nodo]][,3:6]
+# suma por columnas los genes secretados
+x <- apply(x, 2, function(i){sum(i>0)})
+n_secretadas <- rbind(n_secretadas, x)
+}
+colnames(n_secretadas) <- c("n_AP6", "n_AP14", "n_C6", "n_C14")
+n_secretadas$node <- names(lpsm)
+
+# y se añade esto a la tabla principal
+nodes<-join_all(list(nodes,suma_psm, n_secretadas),by="node")
+```
+
+Con este código se hacen los hexágonos, fuente: https://stackoverflow.com/questions/24006361/plot-series-of-filled-hexagons-in-ggplot2
+
+```{r}
+# Separate x and y coordinates
+lx = nodes$x # x-coordinates
+ly = nodes$y # y-coordinates      
+
+# Plot hexagonal lattice as filled hexagons
+hex.x = cbind(lx + 0, lx + 0.5, lx + 0.5, lx + 0, lx - 0.5, lx - 0.5) 
+hex.y = cbind(ly - 1/(sqrt(3)), ly - 1/(2*sqrt(3)), ly + 1/(2*sqrt(3)), ly + 1/(sqrt(3)), ly + 1/(2*sqrt(3)), ly - 1/(2*sqrt(3)))
+#hex.vectors = cbind.data.frame(hex.x, hex.y)
+
+#Get your coordinates in long format with an id
+hexdat.x <-cbind(id = 1:length(hex.x), as.data.frame(hex.x))
+hexdat.x$node<-as.factor(rep(1:576,times=6))
+hexdat.x <- melt(hexdat.x, id.vars = c("id","node"), value.name = "x")
+
+hexdat.y <-cbind(id = 1:length(hex.y), as.data.frame(hex.y))
+hexdat.y$node<-as.factor(rep(1:576,times=6))
+hexdat.y <- melt(hexdat.y, id.vars = c("id","node"), value.name = "y")
+
+hexdat <- merge(hexdat.x, hexdat.y)
+
+ggplot(hexdat, aes(x, y)) + geom_polygon(aes(group = id), fill="grey",colour = "black")
+```
+
+```{r}
+# Se combina la tabla de coordenadas con la de información de los nodos
+nodes_hex<-nodes %>%  select(-c("x", "y")) # 
+hexdat2<-join_all(list(hexdat,nodes_hex),by="node")
+
+# se eligen las columnas de interés:
+hexdat2[,c(1,2,4,5,9,7,8,10)]
+# Este es un tipo de reshape para darle a la tabla el formato necesario para poder trabajar con los datos en ggplot.
+hexdat_trans<-melt(hexdat2[,c(1,2,4,5,9,7,8,10)],id.vars=c("id","node","x","y"))
+
+# Se construye una lista con las distintas condiciones, para hacer un gráfico con cada una:
+lhexdat_trans<-by(hexdat_trans,hexdat_trans$variable,list)
+
+# esto es lo mismo que se ha hecho con los transcritos, pero con los psms
+hexdat2[,c(1,2,4,5,6, 17, 19, 18, 20)]
+hexdat_psm<-melt(hexdat2[,c(1,2,4,5,6, 17, 19, 18, 20)],
+                 id.vars=c("id","node","x","y","num_proteins"))
+# lista con las distintas condiciones
+lhexdat_psm<-by(hexdat_psm,hexdat_psm$variable,list)
+
+num_prot_secretoma<-cbind.data.frame(nodes[,1:4], nodes[,c(19:22)])
+
+lnum_prot_secretoma<-lapply(5:8,function(x){cbind.data.frame(num_prot_secretoma[,1:4],variable=num_prot_secretoma[,x])})
+names(lnum_prot_secretoma) <- colnames(nodes[,c(19:22)])
+```
+
+```{r}
+# Se orden todos los componentes de las listas para que coincidan en el siguiente plot
+lhexdat_trans<- lhexdat_trans[c(1,4,2,3)]
+lhexdat_psm <- lhexdat_psm[c(1,3,2,4)]
+names(lhexdat_trans)
+names(lhexdat_psm)
+names(lnum_prot_secretoma)
+```
+
+# Gráficas
+
+## transcriptoma
+
+```{r}
+# paleta de colores
+myPalette <- colorRampPalette(rev(brewer.pal(11, "Spectral")))
+
+# títulos
+titulo_trans<-c("TRANSCRIPTOMA PAJA 6","TRANSCRIPTOMA PAJA14", "TRANSCRIPTOMA CONTROL6","TRANSCRIPTOMA CONTROL14")
+
+gg_trans<-list()
+
+for(i in 1:length(lhexdat_trans)){
+gg_trans[[i]]<-print(ggplot(data=lhexdat_trans[[i]], aes(x=x, y=y)) + 
+geom_polygon(aes(group = id,fill=value), colour = "black",lwd=0.1)+ #color y grosor de las lineas de los hexagonos, fill es el color de fondo
+geom_text(data=nodes,aes(label=1:576),size=1)+ # tamaño de letra
+ggtitle(titulo_trans[i]) + # los titulos
+scale_fill_gradientn(name="log2",colours = myPalette(500), limits=c(min(apply(nodes[,5:8],2,min)),max(apply(nodes[,5:8],2,max))))+ # aplicando la paleta
+   xlim(0, 26)+
+   ylim(0, 26)+
+   theme(panel.background = element_blank(),
+        axis.ticks = element_blank(),
+        panel.grid = element_blank(),
+        axis.text = element_blank(),
+        axis.title = element_blank(),
+        legend.position = "bottom",
+        legend.text = element_text(size = 3),
+        legend.title = element_text(size = 5),
+        legend.key.size = unit(0.2, "cm"),
+        plot.title = element_text(hjust = 0.5,size=5, margin=margin(2,0,-5,0)),
+        plot.margin=unit(c(0,0,0,0), "cm"),panel.border = element_blank()))
+}
+```
+
+# Secretoma
+
+Mismo código que el del transcriptoma, pero usando la otra lista.
+
+```{r}
+titulo_secr<-c("SECRETOMA PAJA6","SECRETOMA PAJA14","SECRETOMA CONTROL6","SECRETOMA CONTROL14")
+gg_secret<-list()
+for(i in 1:length(lhexdat_psm)){
+gg_secret[[i]]<-print(ggplot(data=lhexdat_psm[[i]], aes(x=x, y=y)) + 
+geom_polygon(aes(group = id,fill=value), colour = "black",lwd=0.1)+
+geom_text(data=lnum_prot_secretoma[[i]],aes(label= paste(num_proteins,paste("(",variable,")",sep=""),sep="")
+),size=0.8)+
+ggtitle(titulo_secr[i]) +
+scale_fill_gradientn(name="PSMs",colours = myPalette(500), limits=c(min(apply(nodes[,15:18],2,min)),max(apply(nodes[,15:18],2,max))))+
+  xlim(0, 26)+
+  ylim(0, 26)+
+  theme(panel.background = element_blank(),
+        axis.ticks = element_blank(),
+        panel.grid = element_blank(),
+        axis.text = element_blank(),
+        axis.title = element_blank(),
+        legend.position = "bottom",
+        legend.text = element_text(size = 3),
+        legend.title = element_text(size = 5),
+        legend.key.size = unit(0.2, "cm"),
+        plot.title = element_text(hjust = 0.5,size=5, margin=margin(2,0,-5,0)),
+        plot.margin=unit(c(0,0,0,0), "cm"),panel.border = element_blank()))
+}
+
+
+# función para guardar las leyendas
+g_legend<-function(a.gplot){
+    tmp <- ggplot_gtable(ggplot_build(a.gplot))
+    leg <- which(sapply(tmp$grobs, function(x) x$name) == "guide-box")
+    legend <- tmp$grobs[[leg]]
+    legend
+}
+
+legend_trans<-g_legend(gg_trans[[1]])
+legend_secret<-g_legend(gg_secret[[1]])
+
+lay <- rbind(c(7,8),
+             c(7,8),
+             c(5,6),
+             c(5,6),
+             c(3,4),
+             c(3,4),
+             c(1,2),
+             c(1,2),
+             c(9,10))
+
+# Guardo todo en un pdf
+
+cairo_pdf(filename=paste0("../00 resultados/secretomas y transcriptomas.pdf "), width=7, height=12.2, bg="transparent")
+grid.arrange(
+gg_trans[[4]]+theme(legend.position = 'none'),
+gg_secret[[4]]+theme(legend.position = 'none'), 
+gg_trans[[3]]+theme(legend.position = 'none'),
+gg_secret[[3]]+theme(legend.position = 'none'),
+gg_trans[[2]]+theme(legend.position = 'none'),
+gg_secret[[2]]+theme(legend.position = 'none'),
+gg_trans[[1]]+theme(legend.position = 'none'),
+gg_secret[[1]]+theme(legend.position = 'none'),
+legend_trans,
+legend_secret, 
+layout_matrix=lay)
+dev.off()
+```
+
+# Gráficas con nodos selecionados
+
+## Altamente transcritos o con expresión diferencial 
+
+Construyo una función a partir del código anterior para aplicarlo a todas las tablas de regiones generadas en el archivo 01 SOM.Rmd
+
+```{r}
+rashami_map <- function(tabla_inicial, nombre_pdf) {
+  nodes_selec<-read.csv(tabla_inicial,header=T, sep = "\t")
+  nodes_selec<-nodes_selec[grepl("MEDIA",nodes_selec$node),]
+  
+  nodes_selec$node<-gsub("MEDIA ","",nodes_selec$node)
+  
+  nodes_selec<-nodes[nodes$node %in% nodes_selec$node,]
+  
+  lhexdat_trans_selec<-lapply(lhexdat_trans,function(x){x[x$node %in% nodes_selec$node,]})
+  
+  gg_trans_selec<-list()
+  for(i in 1:length(lhexdat_trans_selec)){
+  gg_trans_selec[[i]]<-print(ggplot(data=lhexdat_trans_selec[[i]], aes(x=x, y=y)) + 
+  geom_polygon(aes(group = id,fill=value), colour = "black",lwd=0.1)+
+  geom_text(data=nodes_selec,aes(label=node),size=1)+
+  ggtitle(titulo_trans[i]) +
+  scale_fill_gradientn(name="log2",colours = myPalette(500), limits=c(min(apply(nodes[,5:8],2,min)),max(apply(nodes[,5:8],2,max))))+
+  xlim(0, 26)+
+  ylim(0, 26)+
+     theme(panel.background = element_blank(),
+          axis.ticks = element_blank(),
+          panel.grid = element_blank(),
+          axis.text = element_blank(),
+          axis.title = element_blank(),
+          legend.position = "bottom",
+          legend.text = element_text(size = 3),
+          legend.title = element_text(size = 5),
+          legend.key.size = unit(0.2, "cm"),
+          plot.title = element_text(hjust = 0.5,size=5, margin=margin(2,0,-5,0)),
+          plot.margin=unit(c(0,0,0,0), "cm"),panel.border = element_blank()))
+  }
+  
+  
+  lhexdat_psm_selec<-lapply(lhexdat_psm,function(x){x[x$node %in% nodes_selec$node,]})
+  
+  lnum_prot_secretoma_selec<-lapply(lnum_prot_secretoma,function(x){x[x$node %in% nodes_selec$node,]})
+  
+  gg_secret_selec<-list()
+  for(i in 1:length(lhexdat_psm_selec)){
+  gg_secret_selec[[i]]<-print(ggplot(data=lhexdat_psm_selec[[i]], aes(x=x, y=y)) + 
+  geom_polygon(aes(group = id,fill=value), colour = "black",lwd=0.1)+
+  geom_text(data=lnum_prot_secretoma_selec[[i]],aes(label=
+  paste(num_proteins,paste("(",variable,")",sep=""),sep="")
+  ),size=0.8)+
+  ggtitle(titulo_secr[i]) +
+  scale_fill_gradientn(name="PSMs",colours = myPalette(500), limits=c(min(apply(nodes[,15:18],2,min)),max(apply(nodes[,15:18],2,max))))+
+  xlim(0, 26)+
+  ylim(0, 26)+
+    theme(panel.background = element_blank(),
+          axis.ticks = element_blank(),
+          panel.grid = element_blank(),
+          axis.text = element_blank(),
+          axis.title = element_blank(),
+          legend.position = "bottom",
+          legend.text = element_text(size = 3),
+          legend.title = element_text(size = 5),
+          legend.key.size = unit(0.2, "cm"),
+          plot.title = element_text(hjust = 0.5,size=5, margin=margin(2,0,-5,0)),
+          plot.margin=unit(c(0,0,0,0), "cm"),panel.border = element_blank()))
+  }
+  
+  cairo_pdf(filename=paste0(nombre_pdf), width=7, height=12.2, bg="transparent")
+  grid.arrange(
+  gg_trans_selec[[4]]+theme(legend.position = 'none'),
+  gg_secret_selec[[4]]+theme(legend.position = 'none'), 
+  gg_trans_selec[[3]]+theme(legend.position = 'none'),
+  gg_secret_selec[[3]]+theme(legend.position = 'none'),
+  gg_trans_selec[[2]]+theme(legend.position = 'none'),
+  gg_secret_selec[[2]]+theme(legend.position = 'none'),
+  gg_trans_selec[[1]]+theme(legend.position = 'none'),
+  gg_secret_selec[[1]]+theme(legend.position = 'none'),
+  legend_trans,
+  legend_secret, 
+  layout_matrix=lay)
+  dev.off()
+}
+```
+
+```{r}
+rashami_map(tabla_inicial = "../00 resultados/seleccionados/HT o DGE/con medias.txt",
+                         nombre_pdf = "../00 resultados/seleccionados/HT o DGE/secretomas selecionados.pdf")
+```
+
+```{r}
+rashami_map(tabla_inicial = "../00 resultados/seleccionados/HT y DGE/con medias.txt",
+                         nombre_pdf = "../00 resultados/seleccionados/HT y DGE/secretomas selecionados.pdf")
+```
+
+```{r}
+rashami_map(tabla_inicial = "../00 resultados/seleccionados/HT/con medias.txt",
+                         nombre_pdf = "../00 resultados/seleccionados/HT/secretomas selecionados.pdf")
+```
+
+```{r}
+rashami_map(tabla_inicial = "../00 resultados/seleccionados/DGE/con medias.txt",
+                         nombre_pdf = "../00 resultados/seleccionados/DGE/secretomas selecionados.pdf")
+```
+
+```{r}
+rashami_map(tabla_inicial = "../00 resultados/seleccionados/proteinas secretadas/con medias.txt",
+                         nombre_pdf = "../00 resultados/seleccionados/proteinas secretadas/secretomas selecionados.pdf")
+```
+
+# Color de fondo por regiones
+
+Con este código se genera una representación del SOM por colores según si los nodos son HT (rosa), DGE (azul) o ambos (verde). Posteriormente se combina usando Adobe illustrator con la figura del SOM en el que se ven los patrones de expresión, dando la figura principal de este TFM.
+
+```{r}
+som <- read.csv("../00 resultados/SOM576_medias.txt", sep = "\t", header = T)
+
+HT <- read.csv("../00 resultados/seleccionados/HT/con medias.txt", sep = "\t", header = T)$node
+DGE <- read.csv("../00 resultados/seleccionados/DGE/con medias.txt", sep = "\t", header = T)$node
+ambos <- read.csv("../00 resultados/seleccionados/HT y DGE/con medias.txt", sep = "\t", header = T)$node
+
+```
+
+```{r}
+hexdat$group <- ifelse (hexdat$node %in% A, "Highly transcribed node", 
+                     ifelse(hexdat$node %in% B, "Differentially expressed node", 
+                            ifelse(hexdat$node %in% ambos, "both", "none")))
+```
+
+```{r}
+paleta <- c("#ADC467","#A9CFE4","#DDA2CF","white")
+
+pdf("../00 resultados/colores por grupos.pdf",width=10, height=6,paper="a4")
+
+ggplot(hexdat, aes(x, y, fill=group)) + geom_polygon(aes(group = id),colour = "black") + scale_fill_manual(values = paleta) + theme_void()
+  
+dev.off()
+```
